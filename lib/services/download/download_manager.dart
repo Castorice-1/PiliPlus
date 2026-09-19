@@ -124,3 +124,126 @@ class DownloadManager {
     
     final partPaths = <String>[];
     for (int i = 0; i < _threadCount; i++) {
+      partPaths.add('${tempDir.path}/.$fileName.part$i');
+    }
+
+    final receivedPerThread = List<int>.filled(_threadCount, 0);
+    final futures = <Future<void>>[];
+
+    for (int i = 0; i < _threadCount; i++) {
+      final start = i * chunkSize;
+      final end = (i == _threadCount - 1) ? totalSize - 1 : start + chunkSize - 1;
+      final partPath = partPaths[i];
+
+      futures.add(_downloadChunk(
+        index: i,
+        url: url,
+        savePath: partPath,
+        start: start,
+        end: end,
+        onChunkReceived: (bytes) {
+          receivedPerThread[i] = bytes;
+          final currentTotal = receivedPerThread.reduce((a, b) => a + b);
+          onReceiveProgress?.call(currentTotal, totalSize);
+        },
+      ));
+    }
+
+    try {
+      await Future.wait(futures);
+      await _mergeParts(path, partPaths);
+      _status = DownloadStatus.completed;
+      onDone();
+    } catch (e) {
+      for (final p in partPaths) {
+        final f = File(p);
+        if (f.existsSync()) await f.delete();
+      }
+      rethrow;
+    }
+  }
+
+  /// 下载单个分片
+  Future<void> _downloadChunk({
+    required int index,
+    required String url,
+    required String savePath,
+    required int start,
+    required int end,
+    required void Function(int bytes) onChunkReceived,
+  }) async {
+    final file = File(savePath);
+    final sink = file.openWrite(mode: FileMode.writeOnly);
+    
+    try {
+      final response = await Request.http11Dio.get<ResponseBody>(
+        url.http2https,
+        options: Options(
+          headers: {
+            'Range': 'bytes=$start-$end',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          },
+          responseType: ResponseType.stream,
+        ),
+        cancelToken: _cancelToken,
+      );
+
+      int receivedInChunk = 0;
+      await for (final chunk in response.data!.stream) {
+        if (_cancelToken.isCancelled) break;
+        sink.add(chunk);
+        receivedInChunk += chunk.length;
+        onChunkReceived(receivedInChunk);
+      }
+      await sink.close();
+    } catch (e) {
+      await sink.close();
+      rethrow;
+    }
+  }
+
+  /// 合并分片文件
+  Future<void> _mergeParts(String finalPath, List<String> partPaths) async {
+    final finalFile = File(finalPath);
+    if (!finalFile.parent.existsSync()) {
+      finalFile.parent.createSync(recursive: true);
+    }
+    
+    final sink = finalFile.openWrite(mode: FileMode.writeOnly);
+    for (final partPath in partPaths) {
+      final partFile = File(partPath);
+      if (partFile.existsSync()) {
+        await sink.addStream(partFile.openRead());
+        await partFile.delete();
+      }
+    }
+    await sink.close();
+  }
+
+  Future<void> cancel({required bool isDelete}) async {
+    if (!isDelete && _status == DownloadStatus.downloading) {
+      _status = DownloadStatus.pause;
+    }
+    
+    if (!_cancelToken.isCancelled) {
+      _cancelToken.cancel();
+    }
+    
+    try {
+      await task;
+    } catch (_) {}
+    
+    if (isDelete) {
+      final file = File(path);
+      if (file.existsSync()) {
+        await file.tryDel();
+      }
+      final dir = file.parent;
+      final fileName = file.path.split('/').last;
+      final parts = await dir.list().where((e) => e.path.contains('.$fileName.part')).toList();
+      for (final p in parts) {
+        await p.delete();
+      }
+    }
+  }
+}
