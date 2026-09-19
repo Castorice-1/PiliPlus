@@ -13,7 +13,7 @@ import 'package:PiliPlus/models_new/pgc/pgc_info_model/result.dart';
 import 'package:PiliPlus/models_new/video/video_detail/data.dart';
 import 'package:PiliPlus/models_new/video/video_detail/episode.dart' as ugc;
 import 'package:PiliPlus/models_new/video/video_detail/page.dart';
-import 'package:PiliPlus/services/download/download_manager.dart';
+import 'package:PiliPlus/services/download/download_manager.dart'; // 确保指向修改后的 DownloadManager
 import 'package:PiliPlus/utils/cache_manager.dart';
 import 'package:PiliPlus/utils/danmaku_utils.dart';
 import 'package:PiliPlus/utils/extension/file_ext.dart';
@@ -25,8 +25,6 @@ import 'package:flutter_smart_dialog/flutter_smart_dialog.dart';
 import 'package:get/get.dart';
 import 'package:path/path.dart' as path;
 import 'package:synchronized/synchronized.dart';
-
-// ref https://github.com/10miaomiao/bilimiao2/blob/master/bilimiao-download/src/main/java/cn/a10miaomiao/bilimiao/download/DownloadService.kt
 
 class DownloadService extends GetxService {
   static const _entryFile = 'entry.json';
@@ -42,6 +40,7 @@ class DownloadService extends GetxService {
   int? _curCid;
   int? get curCid => _curCid;
   final curDownload = Rxn<BiliDownloadEntryInfo>();
+  
   void _updateCurStatus(DownloadStatus status) {
     if (curDownload.value != null) {
       curDownload
@@ -68,6 +67,8 @@ class DownloadService extends GetxService {
   Future<void> _readDownloadList() async {
     downloadList.clear();
     final downloadDir = Directory(await _getDownloadPath());
+    if (!downloadDir.existsSync()) return;
+    
     await for (final dir in downloadDir.list()) {
       if (dir is Directory) {
         downloadList.addAll(await _readDownloadDirectory(dir));
@@ -81,10 +82,7 @@ class DownloadService extends GetxService {
     Directory pageDir,
   ) async {
     final result = <BiliDownloadEntryInfo>[];
-
-    if (!pageDir.existsSync()) {
-      return result;
-    }
+    if (!pageDir.existsSync()) return result;
 
     await for (final entryDir in pageDir.list()) {
       if (entryDir is Directory) {
@@ -95,16 +93,17 @@ class DownloadService extends GetxService {
             final entry = BiliDownloadEntryInfo.fromJson(jsonDecode(entryJson))
               ..pageDirPath = pageDir.path
               ..entryDirPath = entryDir.path;
+            
             if (entry.isCompleted) {
               result.add(entry);
             } else {
+              // 未完成的放入等待队列，状态重置为 wait
               waitDownloadQueue.add(entry..status = DownloadStatus.wait);
             }
           } catch (_) {}
         }
       }
     }
-
     return result;
   }
 
@@ -115,12 +114,12 @@ class DownloadService extends GetxService {
     VideoQuality videoQuality,
   ) {
     final cid = page.cid!;
-    if (downloadList.indexWhere((e) => e.cid == cid) != -1) {
+    if (downloadList.any((e) => e.cid == cid) || 
+        waitDownloadQueue.any((e) => e.cid == cid)) {
+      SmartDialog.showToast('该视频已在下载列表或已缓存');
       return;
     }
-    if (waitDownloadQueue.indexWhere((e) => e.cid == cid) != -1) {
-      return;
-    }
+
     final pageData = PageInfo(
       cid: cid,
       page: page.page!,
@@ -135,6 +134,7 @@ class DownloadService extends GetxService {
       downloadTitle: '视频已缓存完成',
       downloadSubtitle: videoDetail?.title ?? videoArc!.title,
     );
+
     final currentTime = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final entry = BiliDownloadEntryInfo(
       mediaType: 2,
@@ -149,8 +149,7 @@ class DownloadService extends GetxService {
       qualityPithyDescription: videoQuality.desc,
       guessedTotalBytes: 0,
       totalTimeMilli: (page.duration ?? 0) * 1000,
-      danmakuCount:
-          videoDetail?.stat?.danmaku ?? videoArc?.arc?.stat?.danmaku ?? 0,
+      danmakuCount: videoDetail?.stat?.danmaku ?? videoArc?.arc?.stat?.danmaku ?? 0,
       timeUpdateStamp: currentTime,
       timeCreateStamp: currentTime,
       canPlayInAdvance: true,
@@ -175,17 +174,14 @@ class DownloadService extends GetxService {
     VideoQuality quality,
   ) {
     final cid = episode.cid!;
-    if (downloadList.indexWhere((e) => e.cid == cid) != -1) {
+    if (downloadList.any((e) => e.cid == cid) || 
+        waitDownloadQueue.any((e) => e.cid == cid)) {
+      SmartDialog.showToast('该剧集已在下载列表或已缓存');
       return;
     }
-    if (waitDownloadQueue.indexWhere((e) => e.cid == cid) != -1) {
-      return;
-    }
+
     final currentTime = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final source = SourceInfo(
-      avId: episode.aid!,
-      cid: cid,
-    );
+    final source = SourceInfo(avId: episode.aid!, cid: cid);
     final ep = EpInfo(
       avId: source.avId,
       page: index,
@@ -204,6 +200,7 @@ class DownloadService extends GetxService {
       bvid: episode.bvid ?? IdUtils.av2bv(source.avId),
       sortIndex: index,
     );
+
     final entry = BiliDownloadEntryInfo(
       mediaType: 2,
       hasDashAudio: false,
@@ -216,9 +213,7 @@ class DownloadService extends GetxService {
       preferedVideoQuality: quality.code,
       qualityPithyDescription: quality.desc,
       guessedTotalBytes: 0,
-      totalTimeMilli:
-          (episode.duration ?? 0) *
-          (episode.from == 'pugv' ? 1000 : 1), // pgc millisec,, pugv sec
+      totalTimeMilli: (episode.duration ?? 0) * (episode.from == 'pugv' ? 1000 : 1),
       danmakuCount: pgcItem.stat?.danmaku ?? 0,
       timeUpdateStamp: currentTime,
       timeCreateStamp: currentTime,
@@ -241,11 +236,15 @@ class DownloadService extends GetxService {
     final entryDir = await _getDownloadEntryDir(entry);
     final entryJsonFile = File(path.join(entryDir.path, _entryFile));
     await entryJsonFile.writeAsString(jsonEncode(entry.toJson()));
+    
     entry
       ..pageDirPath = entryDir.parent.path
       ..entryDirPath = entryDir.path
       ..status = DownloadStatus.wait;
+      
     waitDownloadQueue.add(entry);
+    
+    // 如果当前没有正在下载的任务，立即开始
     if (curDownload.value?.status.isDownloading != true) {
       startDownload(entry);
     }
@@ -254,16 +253,18 @@ class DownloadService extends GetxService {
   Future<Directory> _getDownloadEntryDir(BiliDownloadEntryInfo entry) async {
     late final String dirName;
     late final String pageDirName;
+    
     if (entry.ep case final ep?) {
       dirName = 's_${entry.seasonId}';
       pageDirName = ep.episodeId.toString();
     } else if (entry.pageData case final page?) {
       dirName = entry.avid.toString();
       pageDirName = 'c_${page.cid}';
+    } else {
+      throw Exception('Invalid entry type');
     }
-    final pageDir = Directory(
-      path.join(await _getDownloadPath(), dirName, pageDirName),
-    );
+
+    final pageDir = Directory(path.join(await _getDownloadPath(), dirName, pageDirName));
     if (!pageDir.existsSync()) {
       await pageDir.create(recursive: true);
     }
@@ -280,10 +281,12 @@ class DownloadService extends GetxService {
 
   Future<void> startDownload(BiliDownloadEntryInfo entry) {
     return _lock.synchronized(() async {
+      // 停止当前任务
       await _downloadManager?.cancel(isDelete: false);
       await _audioDownloadManager?.cancel(isDelete: false);
       _downloadManager = null;
       _audioDownloadManager = null;
+
       if (curDownload.value case final curEntry?) {
         if (curEntry.status.isDownloading) {
           curEntry.status = DownloadStatus.pause;
@@ -293,7 +296,9 @@ class DownloadService extends GetxService {
       _curCid = entry.cid;
       curDownload.value = entry;
       waitDownloadQueue.refresh();
-      await _startDownload(entry);
+      
+      // 异步启动下载，避免阻塞锁
+      _startDownload(entry);
     });
   }
 
@@ -302,26 +307,19 @@ class DownloadService extends GetxService {
     bool isUpdate = false,
   }) async {
     final cid = entry.pageData?.cid ?? entry.source?.cid;
-    if (cid == null) {
-      return false;
-    }
-    final danmakuFile = File(
-      path.join(entry.entryDirPath, PathUtils.danmakuName),
-    );
+    if (cid == null) return false;
+
+    final danmakuFile = File(path.join(entry.entryDirPath, PathUtils.danmakuName));
     if (isUpdate || !danmakuFile.existsSync()) {
       try {
-        if (!isUpdate) {
-          _updateCurStatus(DownloadStatus.getDanmaku);
-        }
+        if (!isUpdate) _updateCurStatus(DownloadStatus.getDanmaku);
+        
         final seg = (entry.totalTimeMilli / DmUtils.segLength).ceil();
-        if (seg <= 0) {
-          throw StateError('Invalid danmaku segment count: $seg');
-        }
+        if (seg <= 0) throw StateError('Invalid danmaku segment count: $seg');
 
-        final danmaku = (await DmGrpc.dmSegMobile(
-          cid: cid,
-          segmentIndex: 1,
-        )).data;
+        final danmaku = (await DmGrpc.dmSegMobile(cid: cid, segmentIndex: 1)).data;
+        
+        // 并发获取剩余分段
         for (var start = 2; start <= seg; start += _maxDanmakuConcurrency) {
           final end = start + _maxDanmakuConcurrency - 1;
           final responses = await Future.wait([
@@ -331,15 +329,11 @@ class DownloadService extends GetxService {
           for (final response in responses) {
             danmaku.elems.addAll(response.data.elems);
           }
-          responses.clear();
         }
         await danmakuFile.writeAsBytes(danmaku.writeToBuffer());
-
         return true;
       } catch (e) {
-        if (!isUpdate) {
-          _updateCurStatus(DownloadStatus.failDanmaku);
-        }
+        if (!isUpdate) _updateCurStatus(DownloadStatus.failDanmaku);
         if (kDebugMode) SmartDialog.showToast(e.toString());
         return false;
       }
@@ -347,17 +341,12 @@ class DownloadService extends GetxService {
     return true;
   }
 
-  Future<bool> _downloadCover({
-    required BiliDownloadEntryInfo entry,
-  }) async {
+  Future<bool> _downloadCover({required BiliDownloadEntryInfo entry}) async {
     try {
       final filePath = path.join(entry.entryDirPath, PathUtils.coverName);
-      if (File(filePath).existsSync()) {
-        return true;
-      }
-      final file = (await CacheManager.manager.getFileFromCache(
-        entry.cover,
-      ))?.file;
+      if (File(filePath).existsSync()) return true;
+      
+      final file = (await CacheManager.manager.getFileFromCache(entry.cover))?.file;
       if (file != null) {
         await file.copy(filePath);
       } else {
@@ -371,9 +360,7 @@ class DownloadService extends GetxService {
 
   Future<void> _startDownload(BiliDownloadEntryInfo entry) async {
     try {
-      if (!await downloadDanmaku(entry: entry)) {
-        return;
-      }
+      if (!await downloadDanmaku(entry: entry)) return;
 
       _updateCurStatus(DownloadStatus.getPlayUrl);
 
@@ -385,9 +372,7 @@ class DownloadService extends GetxService {
       );
 
       final videoDir = Directory(path.join(entry.entryDirPath, entry.typeTag));
-      if (!videoDir.existsSync()) {
-        await videoDir.create(recursive: true);
-      }
+      if (!videoDir.existsSync()) await videoDir.create(recursive: true);
 
       final mediaJsonFile = File(path.join(videoDir.path, _indexFile));
       await Future.wait([
@@ -395,9 +380,8 @@ class DownloadService extends GetxService {
         _downloadCover(entry: entry),
       ]);
 
-      if (curDownload.value?.cid != entry.cid) {
-        return;
-      }
+      // 检查是否被取消或切换了任务
+      if (curDownload.value?.cid != entry.cid) return;
 
       switch (mediaFileInfo) {
         case Type1 mediaFileInfo:
@@ -409,6 +393,7 @@ class DownloadService extends GetxService {
             onDone: _onDone,
           );
           break;
+          
         case Type2 mediaFileInfo:
           _downloadManager = DownloadManager(
             url: mediaFileInfo.video.first.baseUrl,
@@ -416,32 +401,34 @@ class DownloadService extends GetxService {
             onReceiveProgress: _onReceive,
             onDone: _onDone,
           );
+          
           final audio = mediaFileInfo.audio;
           if (audio != null && audio.isNotEmpty) {
             _audioDownloadManager = DownloadManager(
               url: audio.first.baseUrl,
               path: path.join(videoDir.path, PathUtils.audioNameType2),
-              onReceiveProgress: null,
+              onReceiveProgress: null, // 音频通常较小或不单独显示进度，可省略
               onDone: _onAudioDone,
             );
           }
-          late final first = mediaFileInfo.video.first;
+          
+          // 更新元数据中的分辨率
+          final firstVideo = mediaFileInfo.video.first;
           entry.pageData
-            ?..width = first.width
-            ..height = first.height;
+            ?..width = firstVideo.width
+            ..height = firstVideo.height;
           entry.ep
-            ?..width = first.width
-            ..height = first.height;
+            ?..width = firstVideo.width
+            ..height = firstVideo.height;
           _updateBiliDownloadEntryJson(entry);
           break;
+          
         default:
           break;
       }
     } catch (e) {
       _updateCurStatus(DownloadStatus.failPlayUrl);
-      if (kDebugMode) {
-        debugPrint('get download url error: $e');
-      }
+      if (kDebugMode) debugPrint('get download url error: $e');
     }
   }
 
@@ -452,70 +439,78 @@ class DownloadService extends GetxService {
 
   void _onReceive(int progress, int total) {
     if (curDownload.value case final entry?) {
-      if (progress == 0 && total != 0) {
-        _updateBiliDownloadEntryJson(entry..totalBytes = total);
+      // 更新总大小（如果之前未知）
+      if (entry.totalBytes == 0 && total > 0) {
+        entry.totalBytes = total;
       }
+      
       entry
         ..downloadedBytes = progress
         ..status = DownloadStatus.downloading;
+      
+      // 节流刷新 UI，避免过于频繁
       curDownload.refresh();
     }
   }
 
   void _onDone([Object? error]) {
     if (error != null) {
-      _updateCurStatus(_downloadManager?.status ?? DownloadStatus.pause);
+      // 视频下载失败
+      _updateCurStatus(DownloadStatus.failDownload);
+      // 取消关联的音频下载
+      _audioDownloadManager?.cancel(isDelete: true);
       return;
     }
 
+    // 视频下载完成
     final status = switch (_audioDownloadManager?.status) {
       DownloadStatus.downloading => DownloadStatus.audioDownloading,
       DownloadStatus.failDownload => DownloadStatus.failDownloadAudio,
-      _ => _downloadManager?.status ?? DownloadStatus.pause,
+      _ => DownloadStatus.completed, // 如果没有音频或音频也完成了
     };
+    
     _updateCurStatus(status);
 
     if (curDownload.value case final curEntryInfo?) {
-      curEntryInfo.downloadedBytes = curEntryInfo.totalBytes;
-      if (status == DownloadStatus.completed) {
-        _completeDownload();
-      } else {
-        _updateBiliDownloadEntryJson(curEntryInfo);
+      // 如果只有视频流（无音频或音频已合并），这里标记完成
+      if (_audioDownloadManager == null) {
+         _completeDownload();
       }
     }
   }
 
   void _onAudioDone([Object? error]) {
+    if (error != null) {
+      _updateCurStatus(DownloadStatus.failDownloadAudio);
+      return;
+    }
+    
+    // 音频也下载完成了
     if (_downloadManager?.status == DownloadStatus.completed) {
-      if (error == null) {
-        _completeDownload();
-      } else {
-        final status = _audioDownloadManager?.status ?? DownloadStatus.pause;
-        _updateCurStatus(
-          status == DownloadStatus.failDownload
-              ? DownloadStatus.failDownloadAudio
-              : status,
-        );
-      }
+      _completeDownload();
     }
   }
 
   Future<void> _completeDownload() async {
     final entry = curDownload.value;
-    if (entry == null) {
-      return;
-    }
+    if (entry == null) return;
+
     entry
       ..downloadedBytes = entry.totalBytes
-      ..isCompleted = true;
+      ..isCompleted = true
+      ..status = DownloadStatus.completed;
+      
     await _updateBiliDownloadEntryJson(entry);
+    
     waitDownloadQueue.remove(entry);
     downloadList.insert(0, entry);
     flagNotifier.refresh();
+    
     _curCid = null;
     curDownload.value = null;
     _downloadManager = null;
     _audioDownloadManager = null;
+    
     nextDownload();
   }
 
@@ -532,31 +527,23 @@ class DownloadService extends GetxService {
     bool refresh = true,
     bool downloadNext = true,
   }) async {
-    if (removeList) {
-      downloadList.remove(entry);
-    }
-    if (removeQueue) {
-      waitDownloadQueue.remove(entry);
-    }
+    if (removeList) downloadList.remove(entry);
+    if (removeQueue) waitDownloadQueue.remove(entry);
+    
     if (curDownload.value?.cid == entry.cid) {
-      await cancelDownload(
-        isDelete: true,
-        downloadNext: downloadNext,
-      );
-    }
-    final downloadDir = Directory(entry.pageDirPath);
-    if (downloadDir.existsSync()) {
-      if (!await downloadDir.lengthGte(2)) {
-        await downloadDir.tryDel(recursive: true);
-      } else {
-        final entryDir = Directory(entry.entryDirPath);
-        if (entryDir.existsSync()) {
-          await entryDir.tryDel(recursive: true);
+      await cancelDownload(isDelete: true, downloadNext: downloadNext);
+    } else {
+      // 如果不是当前下载项，直接删除文件
+      final downloadDir = Directory(entry.pageDirPath);
+      if (downloadDir.existsSync()) {
+        if (!await downloadDir.lengthGte(2)) {
+          await downloadDir.tryDel(recursive: true);
+        } else {
+          final entryDir = Directory(entry.entryDirPath);
+          if (entryDir.existsSync()) await entryDir.tryDel(recursive: true);
         }
       }
-    }
-    if (refresh) {
-      flagNotifier.refresh();
+      if (refresh) flagNotifier.refresh();
     }
   }
 
@@ -566,9 +553,7 @@ class DownloadService extends GetxService {
   }) async {
     await Directory(pageDirPath).tryDel(recursive: true);
     downloadList.removeWhere((e) => e.pageDirPath == pageDirPath);
-    if (refresh) {
-      flagNotifier.refresh();
-    }
+    if (refresh) flagNotifier.refresh();
   }
 
   Future<void> cancelDownload({
@@ -577,23 +562,25 @@ class DownloadService extends GetxService {
   }) async {
     await _downloadManager?.cancel(isDelete: isDelete);
     await _audioDownloadManager?.cancel(isDelete: isDelete);
+    
     _downloadManager = null;
     _audioDownloadManager = null;
+    
     if (!isDelete) {
       final entry = curDownload.value;
       if (entry != null) {
         await _updateBiliDownloadEntryJson(entry);
       }
     }
+    
     if (isDelete) {
       _curCid = null;
       curDownload.value = null;
     } else {
       _updateCurStatus(DownloadStatus.pause);
     }
-    if (downloadNext) {
-      nextDownload();
-    }
+    
+    if (downloadNext) nextDownload();
   }
 }
 
